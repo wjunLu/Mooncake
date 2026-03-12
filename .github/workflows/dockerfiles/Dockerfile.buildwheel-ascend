@@ -45,6 +45,17 @@ RUN wget -q https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/tool
     chmod +x mooncake_installer.sh && \
     bash mooncake_installer.sh -y
 
+# Build and install gflags from source (yum version too old for CMake targets)
+RUN cd /tmp && \
+    git clone --depth 1 --branch v2.2.2 https://github.com/gflags/gflags.git && \
+    cd gflags && \
+    mkdir build && cd build && \
+    cmake .. -DBUILD_SHARED_LIBS=ON -DBUILD_STATIC_LIBS=ON && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/gflags
+
 # Build Mooncake with Ascend support (same as vllm-ascend)
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/lib64:$LD_LIBRARY_PATH && \
