@@ -1,0 +1,99 @@
+name: Release Ascend
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11']
+    env:
+      BUILD_WITH_EP: "0"
+      ASCEND_BUILD: "1"
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          docker-images: false
+
+      - name: Build wheel in Docker
+        run: |
+          docker build \
+            -f .github/workflows/dockerfiles/Dockerfile.buildwheel-ascend \
+            --build-arg PY_VERSION=${{ matrix.python-version }} \
+            -t mooncake-wheel-ascend:v1 .
+
+          docker run --rm \
+            -u "$(id -u):$(id -g)" \
+            -v "$(pwd):/outpwd" \
+            mooncake-wheel-ascend:v1 \
+            bash -c "cp -r /workspace/mooncake-wheel/dist /outpwd/"
+
+          ls -la dist/
+
+      - name: Generate Python version tag
+        id: generate_tag
+        run: |
+          echo "python_version_tag=$(echo ${{ matrix.python-version }} | tr -d '.')" >> $GITHUB_OUTPUT
+
+      - name: Upload Python wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mooncake-wheel-ascend-py${{ steps.generate_tag.outputs.python_version_tag }}
+          path: dist/*.whl
+
+  publish-release:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: mooncake-wheel/dist-all
+          pattern: mooncake-wheel-ascend-py*
+
+      - name: Prepare wheels for release
+        run: |
+          mkdir -p mooncake-wheel/dist-release
+          find mooncake-wheel/dist-all -name "*.whl" -exec cp {} mooncake-wheel/dist-release/ \;
+          echo "Collected wheels for release:"
+          ls -la mooncake-wheel/dist-release/
+
+      # Uncomment the following steps when ready to publish
+      # - name: Upload wheels to GitHub Release
+      #   uses: softprops/action-gh-release@v1
+      #   with:
+      #     files: mooncake-wheel/dist-release/*.whl
+
+      # - name: Publish package to PyPI
+      #   if: github.repository == 'kvcache-ai/Mooncake'
+      #   uses: pypa/gh-action-pypi-publish@release/v1
+      #   with:
+      #     packages-dir: mooncake-wheel/dist-release/
+      #     password: ${{ secrets.PYPI_ASCEND_API_TOKEN }}
+
+      - name: Upload wheels as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mooncake-wheel-ascend-all
+          path: mooncake-wheel/dist-release/*.whl

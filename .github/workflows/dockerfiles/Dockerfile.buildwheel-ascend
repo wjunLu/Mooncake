@@ -1,0 +1,73 @@
+#
+# Copyright 2024 KVCache.AI
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+ARG PY_VERSION=3.11
+FROM quay.io/ascend/manylinux:8.5.1-910b-manylinux_2_28-py${PY_VERSION}
+
+ARG SOC_VERSION="ascend910b1"
+
+# Define environments
+ENV DEBIAN_FRONTEND=noninteractive
+ENV SOC_VERSION=$SOC_VERSION
+ENV ASCEND_BUILD=1
+ENV BUILD_WITH_EP=0
+
+# Install build dependencies
+RUN yum update -y && \
+    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake \
+                   numactl-devel patchelf libcurl-devel unzip && \
+    rm -rf /var/cache/yum
+
+WORKDIR /workspace
+
+# Copy Mooncake source
+COPY . /workspace/
+
+# Install Python dependencies
+RUN python3 -m pip install --upgrade pip setuptools wheel build auditwheel && \
+    python3 -m pip install aiohttp requests
+
+# Install project dependencies using vllm-ascend's installer (supports yum)
+RUN wget -q https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/tools/mooncake_installer.sh && \
+    chmod +x mooncake_installer.sh && \
+    bash mooncake_installer.sh -y
+
+# Build Mooncake with Ascend support
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/lib64:$LD_LIBRARY_PATH && \
+    git submodule update --init --recursive || true && \
+    rm -rf build && mkdir -p build && cd build && \
+    cmake .. \
+        -DUSE_ASCEND_DIRECT=ON \
+        -DBUILD_EXAMPLES=OFF \
+        -DBUILD_UNIT_TESTS=OFF \
+        -DUSE_HTTP=ON \
+        -DUSE_ETCD=ON \
+        -DSTORE_USE_ETCD=ON \
+        -DCMAKE_BUILD_TYPE=Release && \
+    make -j$(nproc) && \
+    make install
+
+# Build Python wheel
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/lib64:$LD_LIBRARY_PATH:/usr/local/lib && \
+    cd /workspace && \
+    ./scripts/build_wheel.sh
+
+# Show the built wheel
+RUN ls -la /workspace/mooncake-wheel/dist/
+
+CMD ["/bin/bash"]
