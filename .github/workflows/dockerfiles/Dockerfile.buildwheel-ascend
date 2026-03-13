@@ -15,7 +15,7 @@
 #
 
 ARG PY_VERSION=3.11
-FROM quay.io/ascend/manylinux:8.5.1-910b-manylinux_2_28-py${PY_VERSION}
+FROM quay.nju.edu.cn/ascend/manylinux:8.5.1-910b-manylinux_2_28-py${PY_VERSION}
 
 ARG SOC_VERSION="ascend910b1"
 
@@ -40,26 +40,24 @@ COPY . /workspace/
 RUN python3 -m pip install --upgrade pip setuptools wheel build auditwheel && \
     python3 -m pip install aiohttp requests
 
-# Install project dependencies using vllm-ascend's installer (supports yum)
-RUN wget -q https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/tools/mooncake_installer.sh && \
-    chmod +x mooncake_installer.sh && \
-    bash mooncake_installer.sh -y
-
 # Build and install gflags from source (yum version too old for CMake targets)
 RUN cd /tmp && \
     git clone --depth 1 --branch v2.2.2 https://github.com/gflags/gflags.git && \
     cd gflags && \
     mkdir build && cd build && \
-    cmake .. -DBUILD_SHARED_LIBS=ON -DBUILD_STATIC_LIBS=ON && \
+    cmake .. -DBUILD_SHARED_LIBS=ON -DBUILD_STATIC_LIBS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON && \
     make -j$(nproc) && \
     make install && \
     ldconfig && \
     rm -rf /tmp/gflags
 
-# Build Mooncake with Ascend support (same as vllm-ascend)
-RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+# Install project dependencies using vllm-ascend's installer (supports yum)
+RUN wget -q https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/tools/mooncake_installer.sh && \
+    chmod +x mooncake_installer.sh && \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/lib64:$LD_LIBRARY_PATH && \
     git submodule update --init --recursive || true && \
+    bash mooncake_installer.sh -y && \
     rm -rf build && mkdir -p build && cd build && \
     cmake .. -DUSE_ASCEND_DIRECT=ON && \
     make -j$(nproc) && \
