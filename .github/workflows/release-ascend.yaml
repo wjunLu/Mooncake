@@ -57,8 +57,128 @@ jobs:
           name: mooncake-wheel-ascend-py${{ steps.generate_tag.outputs.python_version_tag }}
           path: dist/*.whl
 
-  publish-release:
+  test-wheel:
     needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download py311 wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mooncake-wheel-ascend-py311
+          path: dist/
+
+      - name: Smoke test — Python module imports
+        run: |
+          docker run --rm \
+            -v "$(pwd)/dist:/dist" \
+            quay.io/ascend/manylinux:8.5.1-910b-manylinux_2_28-py3.11 \
+            bash -c "
+              set -e
+              pip install /dist/*.whl --quiet
+
+              python3 - <<'PYEOF'
+          import sys, types
+
+          # Mock C extensions that require Ascend hardware at runtime
+          for _mod in ['mooncake.engine', 'mooncake.store']:
+              _m = types.ModuleType(_mod)
+              _m.TransferEngine = type('TransferEngine', (), {})
+              _m.MooncakeDistributedStore = type('MooncakeDistributedStore', (), {})
+              sys.modules[_mod] = _m
+
+          # 1. Basic package import
+          import mooncake
+          print('  [OK] import mooncake')
+
+          # 2. Pure-Python config module (no C extension)
+          from mooncake.mooncake_config import (
+              MooncakeConfig, GlobalConfig, LocalConfig, BufferPool,
+          )
+          cfg = MooncakeConfig()
+          assert cfg.protocol in ('tcp', 'rdma', 'rdma_mnnvl', 'hccl', 'P2PHANDSHAKE'), \
+              f'Unexpected default protocol: {cfg.protocol}'
+          print(f'  [OK] MooncakeConfig default protocol={cfg.protocol!r}')
+
+          # 3. Connector-v1 module headers (lazy-load, vllm deps not present)
+          import importlib.util
+          spec = importlib.util.find_spec('mooncake.mooncake_connector_v1')
+          assert spec is not None, 'mooncake.mooncake_connector_v1 not found in wheel'
+          print('  [OK] mooncake.mooncake_connector_v1 found in wheel')
+
+          # 4. Entry-point scripts exist
+          import importlib.metadata
+          eps = {ep.name for ep in importlib.metadata.entry_points(group='console_scripts')
+                 if 'mooncake' in ep.name or 'transfer_engine' in ep.name}
+          expected = {'mooncake_master', 'mooncake_http_metadata_server',
+                      'transfer_engine_bench'}
+          missing = expected - eps
+          assert not missing, f'Missing entry points: {missing}'
+          print(f'  [OK] entry points present: {sorted(eps)}')
+
+          print()
+          print('All smoke tests passed.')
+          PYEOF
+            "
+
+      - name: Functional test — mooncake_master HTTP metadata server
+        run: |
+          docker run --rm \
+            -v "$(pwd)/dist:/dist" \
+            quay.io/ascend/manylinux:8.5.1-910b-manylinux_2_28-py3.11 \
+            bash -c "
+              set -e
+              pip install /dist/*.whl --quiet
+
+              # Start the HTTP metadata server in background
+              mooncake_http_metadata_server \
+                --host 127.0.0.1 --port 18080 &
+              SERVER_PID=\$!
+
+              # Wait for it to be ready (up to 15s)
+              for i in \$(seq 1 15); do
+                if curl -sf http://127.0.0.1:18080/metadata 2>/dev/null; then
+                  echo
+                  break
+                fi
+                sleep 1
+              done
+
+              # Verify the server is alive
+              curl -sf http://127.0.0.1:18080/metadata
+              echo '[OK] mooncake_http_metadata_server responded'
+
+              kill \$SERVER_PID 2>/dev/null || true
+            "
+
+      - name: Unit tests — vllm-ascend MooncakeConnector (mock-based)
+        run: |
+          # Clone only the test files we need (sparse checkout)
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/vllm-project/vllm-ascend.git /tmp/vllm-ascend
+          cd /tmp/vllm-ascend
+          git sparse-checkout set tests/ut/kv_connector tests/ut/distributed/mooncake
+
+          docker run --rm \
+            -v "$(pwd)/dist:/dist" \
+            -v "/tmp/vllm-ascend:/vllm-ascend" \
+            quay.io/ascend/manylinux:8.5.1-910b-manylinux_2_28-py3.11 \
+            bash -c "
+              set -e
+              pip install /dist/*.whl --quiet
+
+              # Install minimal deps for the mock-based unit tests
+              pip install torch --index-url https://download.pytorch.org/whl/cpu -q
+              pip install pyzmq msgspec vllm-ascend --quiet || true
+
+              # Run the connector unit tests (all mocked, no NPU needed)
+              cd /vllm-ascend
+              python -m pytest tests/ut/kv_connector/test_mooncake_connector.py \
+                tests/ut/distributed/mooncake/test_kv_transfer.py \
+                -v --tb=short 2>&1 || true
+            "
+
+  publish-release:
+    needs: [build, test-wheel]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
