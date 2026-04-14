@@ -94,9 +94,9 @@ jobs:
           # 2. Pure-Python config module (no C extension)
           import inspect
           from mooncake.mooncake_config import MooncakeConfig
-          params = inspect.signature(MooncakeConfig).parameters
-          assert 'protocol' in params, f'MooncakeConfig missing protocol param; got: {list(params)}'
-          print(f'  [OK] MooncakeConfig has protocol param (default={params["protocol"].default!r})')
+          param_names = list(inspect.signature(MooncakeConfig).parameters)
+          assert 'protocol' in param_names, 'MooncakeConfig missing protocol param; got: ' + str(param_names)
+          print('  [OK] MooncakeConfig has protocol param')
 
           # 3. Connector-v1 module present in the wheel
           import importlib.util
