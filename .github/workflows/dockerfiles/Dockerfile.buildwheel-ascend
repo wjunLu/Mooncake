@@ -1,0 +1,103 @@
+#
+# Copyright 2024 KVCache.AI
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+ARG PY_VERSION=3.11
+FROM quay.io/ascend/manylinux:8.5.1-910b-manylinux_2_28-py${PY_VERSION}
+
+ARG SOC_VERSION="ascend910b1"
+
+# Define environments
+ENV SOC_VERSION=$SOC_VERSION
+ENV ASCEND_BUILD=1
+ENV BUILD_WITH_EP=0
+
+# Install system build dependencies
+# xxhash-devel requires EPEL on AlmaLinux/RHEL 8
+RUN yum install -y epel-release && \
+    yum update -y && \
+    yum install -y \
+        gcc gcc-c++ make cmake git wget unzip \
+        libibverbs-devel numactl-devel patchelf \
+        gflags-devel glog-devel \
+        jsoncpp-devel hiredis-devel \
+        mpich mpich-devel boost1.78-devel openssl-devel \
+        libcurl-devel libzstd-devel xxhash-devel && \
+    rm -rf /var/cache/yum && \
+    ln -sf /usr/include/boost1.78/boost /usr/include/boost
+
+# Build gflags from source: yum version lacks proper CMake targets,
+# and v2.2.2 CMakeLists.txt requires patching for CMake >= 4.x
+RUN cd /tmp && \
+    git clone --depth 1 --branch v2.2.2 https://github.com/gflags/gflags.git && \
+    cd gflags && mkdir build && cd build && \
+    cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+             -DBUILD_SHARED_LIBS=ON -DBUILD_STATIC_LIBS=ON \
+             -DCMAKE_POSITION_INDEPENDENT_CODE=ON && \
+    make -j$(nproc) && make install && ldconfig && \
+    rm -rf /tmp/gflags
+
+# Build yaml-cpp from source (not available as a yum package)
+RUN cd /tmp && \
+    git clone --depth 1 https://github.com/jbeder/yaml-cpp.git && \
+    cd yaml-cpp && mkdir build && cd build && \
+    cmake .. && make -j$(nproc) && make install && \
+    rm -rf /tmp/yaml-cpp
+
+# Build msgpack-c from source (not available as a yum package)
+RUN cd /tmp && \
+    git clone --depth 1 --branch cpp-7.0.0 https://github.com/msgpack/msgpack-c.git && \
+    cd msgpack-c && mkdir build && cd build && \
+    cmake .. -DMSGPACK_USE_BOOST=OFF && make -j$(nproc) && make install && \
+    rm -rf /tmp/msgpack-c
+
+# Build yalantinglibs from source
+RUN cd /tmp && \
+    git clone --depth 1 --branch v0.5.7 https://github.com/alibaba/yalantinglibs.git && \
+    cd yalantinglibs && mkdir build && cd build && \
+    cmake .. -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARK=OFF -DBUILD_UNIT_TESTS=OFF && \
+    make -j$(nproc) && make install && \
+    rm -rf /tmp/yalantinglibs
+
+WORKDIR /workspace
+
+# Copy Mooncake source
+COPY . /workspace/
+
+# Clone pybind11 submodule (not included via COPY since .git is excluded)
+RUN git clone --depth 1 --branch v2.13.6 \
+    https://github.com/pybind/pybind11.git /workspace/extern/pybind11
+
+# Install Python build dependencies
+RUN python3 -m pip install --upgrade pip setuptools wheel build auditwheel && \
+    python3 -m pip install aiohttp requests
+
+# Build Mooncake with Ascend direct transport support
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/lib64:$LD_LIBRARY_PATH && \
+    mkdir -p build && cd build && \
+    cmake .. -DUSE_ASCEND_DIRECT=ON -DBUILD_UNIT_TESTS=OFF && \
+    make -j$(nproc) && \
+    make install
+
+# Build Python wheel
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/lib64:$LD_LIBRARY_PATH:/usr/local/lib && \
+    ./scripts/build_wheel.sh
+
+# Show the built wheel
+RUN ls -la /workspace/mooncake-wheel/dist/
+
+CMD ["/bin/bash"]
