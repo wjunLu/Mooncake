@@ -10,12 +10,20 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 jobs:
   build:
-    runs-on: ubuntu-22.04
     permissions:
       contents: write
     strategy:
       matrix:
         python-version: ['3.10', '3.11']
+        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+            platform: linux/amd64
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
     env:
       BUILD_WITH_EP: "0"
       ASCEND_BUILD: "1"
@@ -34,11 +42,13 @@ jobs:
       - name: Build wheel in Docker
         run: |
           docker build \
+            --platform ${{ matrix.platform }} \
             -f .github/workflows/dockerfiles/Dockerfile.buildwheel-ascend \
             --build-arg PY_VERSION=${{ matrix.python-version }} \
             -t mooncake-wheel-ascend:v1 .
 
           docker run --rm \
+            --platform ${{ matrix.platform }} \
             -u "$(id -u):$(id -g)" \
             -v "$(pwd):/outpwd" \
             mooncake-wheel-ascend:v1 \
@@ -54,17 +64,27 @@ jobs:
       - name: Upload Python wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mooncake-wheel-ascend-py${{ steps.generate_tag.outputs.python_version_tag }}
+          name: mooncake-wheel-ascend-py${{ steps.generate_tag.outputs.python_version_tag }}-${{ matrix.arch }}
           path: dist/*.whl
 
   test-wheel:
     needs: build
-    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+            platform: linux/amd64
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Download py311 wheel artifact
         uses: actions/download-artifact@v4
         with:
-          name: mooncake-wheel-ascend-py311
+          name: mooncake-wheel-ascend-py311-${{ matrix.arch }}
           path: dist/
 
       - name: Smoke test — Python module imports
@@ -110,6 +130,7 @@ jobs:
           PYEOF
 
           docker run --rm \
+            --platform ${{ matrix.platform }} \
             -v "$(pwd)/dist:/dist" \
             -v "/tmp/mooncake_smoke_test.py:/smoke_test.py" \
             quay.io/ascend/manylinux:8.5.1-910b-manylinux_2_28-py3.11 \
@@ -122,6 +143,7 @@ jobs:
       - name: Functional test — mooncake_master HTTP metadata server
         run: |
           docker run --rm \
+            --platform ${{ matrix.platform }} \
             -v "$(pwd)/dist:/dist" \
             quay.io/ascend/manylinux:8.5.1-910b-manylinux_2_28-py3.11 \
             bash -c "
@@ -158,6 +180,7 @@ jobs:
           git sparse-checkout set tests/ut/kv_connector tests/ut/distributed/mooncake
 
           docker run --rm \
+            --platform ${{ matrix.platform }} \
             -v "$(pwd)/dist:/dist" \
             -v "/tmp/vllm-ascend:/vllm-ascend" \
             quay.io/ascend/manylinux:8.5.1-910b-manylinux_2_28-py3.11 \
@@ -190,7 +213,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: mooncake-wheel/dist-all
-          pattern: mooncake-wheel-ascend-py*
+          pattern: mooncake-wheel-ascend-py*-*
 
       - name: Prepare wheels for release
         run: |
